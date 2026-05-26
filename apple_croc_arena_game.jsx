@@ -10,17 +10,17 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
-function len(x, y) {
+function distance(x, y) {
   return Math.hypot(x, y);
 }
 
 function normalize(x, y) {
-  const l = len(x, y) || 1;
+  const l = Math.hypot(x, y) || 1;
   return { x: x / l, y: y / l, l };
 }
 
 function lerpAngle(a, b, t) {
-  let d = ((b - a + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+  const d = ((b - a + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
   return a + d * t;
 }
 
@@ -43,9 +43,7 @@ function worldToScreen(x, y) {
 
 function makeGame() {
   return {
-    running: true,
     over: false,
-    wonMoment: false,
     time: 0,
     lastFrame: 0,
     lastUi: 0,
@@ -59,7 +57,19 @@ function makeGame() {
     cooldown: 0,
     shake: 0,
     keys: {},
-    pointer: { x: 120, y: 0, active: false, down: false },
+    pointer: { x: 120, y: 0, active: false },
+    touch: {
+      activePointers: new Map(),
+      movePointerId: null,
+      firePointerId: null,
+      startX: 0,
+      startY: 0,
+      currentX: 0,
+      currentY: 0,
+      moveX: 0,
+      moveY: 0,
+      autoFire: false,
+    },
     player: {
       x: 0,
       y: 120,
@@ -85,6 +95,36 @@ function makeGame() {
   };
 }
 
+function updateTouchMove(g) {
+  const t = g.touch;
+  const dx = t.currentX - t.startX;
+  const dy = t.currentY - t.startY;
+  const v = normalize(dx, dy);
+
+  if (v.l < 8) {
+    t.moveX = 0;
+    t.moveY = 0;
+    return;
+  }
+
+  const strength = clamp(v.l / 60, 0, 1);
+  t.moveX = v.x * strength;
+  t.moveY = v.y * strength;
+  g.player.aimX = v.x;
+  g.player.aimY = v.y;
+}
+
+function clearTouchMove(g) {
+  const t = g.touch;
+  t.movePointerId = null;
+  t.startX = 0;
+  t.startY = 0;
+  t.currentX = 0;
+  t.currentY = 0;
+  t.moveX = 0;
+  t.moveY = 0;
+}
+
 function spawnCroc(g) {
   const alive = g.crocs.filter((c) => c.alive);
   let x;
@@ -96,7 +136,7 @@ function spawnCroc(g) {
     angle = tail.angle;
     x = tail.x - Math.cos(tail.angle) * 70;
     y = tail.y - Math.sin(tail.angle) * 70;
-    const d = len(x, y);
+    const d = distance(x, y);
     if (d > ARENA_R - 38) {
       x *= (ARENA_R - 38) / d;
       y *= (ARENA_R - 38) / d;
@@ -172,38 +212,42 @@ function updateGame(g, dt) {
   if (g.keys.ArrowLeft || g.keys.a || g.keys.A) mx -= 1;
   if (g.keys.ArrowRight || g.keys.d || g.keys.D) mx += 1;
 
-  if (mx === 0 && my === 0 && g.pointer.down) {
-    const toPointer = normalize(g.pointer.x - p.x, g.pointer.y - p.y);
-    if (toPointer.l > 16) {
-      mx = toPointer.x;
-      my = toPointer.y;
-    }
+  if (g.touch.movePointerId !== null) {
+    mx = g.touch.moveX;
+    my = g.touch.moveY;
+  }
+
+  if (g.touch.autoFire) {
+    fireArrow(g);
   }
 
   const move = normalize(mx, my);
-  if (mx !== 0 || my !== 0) {
-    p.x += move.x * p.speed * dt;
-    p.y += move.y * p.speed * dt;
+  const isMoving = Math.abs(mx) > 0.001 || Math.abs(my) > 0.001;
+  if (isMoving) {
+    const strength = clamp(Math.hypot(mx, my), 0, 1);
+    p.x += move.x * p.speed * strength * dt;
+    p.y += move.y * p.speed * strength * dt;
+
+    if (g.touch.movePointerId !== null) {
+      p.aimX = move.x;
+      p.aimY = move.y;
+    }
   }
 
-  if (g.pointer.active) {
+  if (g.pointer.active && g.touch.movePointerId === null) {
     const aim = normalize(g.pointer.x - p.x, g.pointer.y - p.y);
     if (aim.l > 8) {
       p.aimX = aim.x;
       p.aimY = aim.y;
     }
-  } else if (mx !== 0 || my !== 0) {
-    p.aimX = move.x;
-    p.aimY = move.y;
   }
 
-  const pd = len(p.x, p.y);
+  const pd = distance(p.x, p.y);
   if (pd > ARENA_R - p.r - 4) {
     p.x *= (ARENA_R - p.r - 4) / pd;
     p.y *= (ARENA_R - p.r - 4) / pd;
   }
 
-  const alive = g.crocs.filter((c) => c.alive);
   g.spawnTimer += dt;
   const spawnEvery = clamp(5.5 - g.time * 0.035, 2.15, 5.5);
   if (g.spawnTimer >= spawnEvery) {
@@ -244,7 +288,7 @@ function updateGame(g, dt) {
       c.y += (dy / d) * step;
     }
 
-    const cd = len(c.x, c.y);
+    const cd = distance(c.x, c.y);
     if (cd > ARENA_R - 22) {
       c.x *= (ARENA_R - 22) / cd;
       c.y *= (ARENA_R - 22) / cd;
@@ -258,7 +302,7 @@ function updateGame(g, dt) {
     arrow.y += arrow.vy * dt;
 
     let consumed = false;
-    if (len(arrow.x, arrow.y) > ARENA_R - 4 || arrow.life <= 0) {
+    if (distance(arrow.x, arrow.y) > ARENA_R - 4 || arrow.life <= 0) {
       consumed = true;
     }
 
@@ -307,7 +351,6 @@ function updateGame(g, dt) {
     const head = Math.hypot(p.x - headX, p.y - headY);
     if (body < p.r + 14 || head < p.r + 16) {
       g.over = true;
-      g.running = false;
       g.shake = 1;
       burst(g, p.x, p.y, 34, 200, "bite");
       break;
@@ -326,7 +369,7 @@ function updateGame(g, dt) {
   g.particles = nextParticles;
 }
 
-function drawRoundedRect(ctx, x, y, w, h, r) {
+function roundedRect(ctx, x, y, w, h, r) {
   const radius = Math.min(r, w / 2, h / 2);
   ctx.beginPath();
   ctx.moveTo(x + radius, y);
@@ -338,10 +381,9 @@ function drawRoundedRect(ctx, x, y, w, h, r) {
 }
 
 function drawArena(ctx, g) {
-  ctx.save();
-
   const shakeX = (Math.random() - 0.5) * g.shake * 7;
   const shakeY = (Math.random() - 0.5) * g.shake * 7;
+  ctx.save();
   ctx.translate(shakeX, shakeY);
 
   ctx.shadowColor = "rgba(15, 23, 42, 0.16)";
@@ -381,16 +423,6 @@ function drawArena(ctx, g) {
     ctx.moveTo(CX, CY);
     ctx.lineTo(CX + Math.cos(a) * ARENA_R, CY + Math.sin(a) * ARENA_R);
     ctx.stroke();
-  }
-  ctx.globalAlpha = 1;
-
-  ctx.fillStyle = "rgba(255,255,255,0.23)";
-  for (let i = 0; i < 88; i += 1) {
-    const a = (i * 2.399 + g.time * 0.03) % (Math.PI * 2);
-    const r = 20 + ((i * 39) % (ARENA_R - 36));
-    ctx.beginPath();
-    ctx.arc(CX + Math.cos(a) * r, CY + Math.sin(a) * r, 1.2, 0, Math.PI * 2);
-    ctx.fill();
   }
   ctx.restore();
 
@@ -492,29 +524,13 @@ function drawCroc(ctx, c) {
   ctx.arc(39, 6, 1.35, 0, Math.PI * 2);
   ctx.fill();
 
-  ctx.fillStyle = "rgba(255,255,255,0.9)";
-  for (let i = 0; i < 4; i += 1) {
-    ctx.beginPath();
-    ctx.moveTo(48 - i * 8, -14);
-    ctx.lineTo(44 - i * 8, -7);
-    ctx.lineTo(40 - i * 8, -14);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.moveTo(48 - i * 8, 14);
-    ctx.lineTo(44 - i * 8, 7);
-    ctx.lineTo(40 - i * 8, 14);
-    ctx.fill();
-  }
-
   ctx.restore();
 
-  const hpX = s.x - 23;
-  const hpY = s.y - 34;
   ctx.save();
-  drawRoundedRect(ctx, hpX, hpY, 46, 6, 4);
+  roundedRect(ctx, s.x - 23, s.y - 34, 46, 6, 4);
   ctx.fillStyle = "rgba(255,255,255,0.78)";
   ctx.fill();
-  drawRoundedRect(ctx, hpX, hpY, 46 * hpRatio, 6, 4);
+  roundedRect(ctx, s.x - 23, s.y - 34, 46 * hpRatio, 6, 4);
   ctx.fillStyle = hpRatio > 0.45 ? "#34c759" : "#ff9f0a";
   ctx.fill();
   ctx.restore();
@@ -590,6 +606,36 @@ function drawParticles(ctx, g) {
   }
 }
 
+function drawVirtualJoystick(ctx, g) {
+  const t = g.touch;
+  if (t.movePointerId === null) return;
+
+  const base = worldToScreen(t.startX, t.startY);
+  const knob = worldToScreen(t.currentX, t.currentY);
+  const dx = knob.x - base.x;
+  const dy = knob.y - base.y;
+  const d = Math.hypot(dx, dy) || 1;
+  const maxR = 54;
+  const kx = base.x + (dx / d) * Math.min(d, maxR);
+  const ky = base.y + (dy / d) * Math.min(d, maxR);
+
+  ctx.save();
+  ctx.globalAlpha = 0.76;
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(0, 122, 255, 0.32)";
+  ctx.fillStyle = "rgba(255,255,255,0.42)";
+  ctx.beginPath();
+  ctx.arc(base.x, base.y, 58, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = "rgba(0, 122, 255, 0.28)";
+  ctx.beginPath();
+  ctx.arc(kx, ky, 25, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 function renderGame(ctx, g) {
   ctx.clearRect(0, 0, WIDTH, HEIGHT);
 
@@ -600,9 +646,7 @@ function renderGame(ctx, g) {
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, WIDTH, HEIGHT);
 
-  ctx.save();
   drawArena(ctx, g);
-  ctx.restore();
 
   ctx.save();
   ctx.beginPath();
@@ -618,13 +662,389 @@ function renderGame(ctx, g) {
 
   ctx.restore();
 
+  drawVirtualJoystick(ctx, g);
+
   ctx.save();
   ctx.font = "600 13px -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
-  ctx.fillStyle = "rgba(29,29,31,0.56)";
+  ctx.fillStyle = "rgba(29,29,31,0.46)";
   ctx.textAlign = "center";
-  ctx.fillText("斗兽场边界会把你挡回来，但鳄鱼身体碰到你就结束", CX, CY + ARENA_R + 34);
+  ctx.fillText("单指拖动移动，第二根手指射箭", CX, CY + ARENA_R + 34);
   ctx.restore();
 }
+
+const styles = `
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", sans-serif;
+  color: #1d1d1f;
+  background: #f5f5f7;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: auto;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+canvas,
+.game-page,
+.game-shell,
+.game-header,
+.game-stats,
+.game-stage-wrap,
+.game-stage,
+.game-canvas,
+.game-help {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.game-page,
+.game-stage,
+.game-canvas,
+canvas {
+  touch-action: none;
+  overscroll-behavior: contain;
+}
+
+button {
+  font: inherit;
+}
+
+.game-page {
+  min-height: 100svh;
+  width: 100%;
+  display: flex;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 12% 0%, rgba(0, 122, 255, 0.16), transparent 30%),
+    radial-gradient(circle at 88% 10%, rgba(255, 149, 0, 0.16), transparent 30%),
+    linear-gradient(135deg, #f5f5f7 0%, #eef2ff 52%, #f7efe2 100%);
+}
+
+.game-shell {
+  width: 100%;
+  max-width: 1120px;
+  height: 100svh;
+  margin: 0 auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+}
+
+.game-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.70);
+  box-shadow: 0 18px 56px rgba(15, 23, 42, 0.10);
+  backdrop-filter: blur(24px);
+}
+
+.game-kicker {
+  display: inline-flex;
+  margin-bottom: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.05);
+  color: rgba(0, 0, 0, 0.48);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.game-title {
+  margin: 0;
+  color: #111114;
+  font-size: clamp(26px, 3.5vw, 40px);
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: -0.05em;
+}
+
+.game-subtitle {
+  margin: 7px 0 0;
+  max-width: 760px;
+  color: rgba(0, 0, 0, 0.56);
+  font-size: 14px;
+  line-height: 1.45;
+  font-weight: 500;
+}
+
+.subtitle-short {
+  display: none;
+}
+
+.restart-button {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 18px;
+  padding: 11px 16px;
+  color: white;
+  background: #007aff;
+  box-shadow: 0 12px 24px rgba(0, 122, 255, 0.25);
+  font-size: 14px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.restart-button:active {
+  transform: scale(0.98);
+}
+
+.game-stats {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.stat-card {
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 20px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.68);
+  box-shadow: 0 12px 34px rgba(15, 23, 42, 0.07);
+  backdrop-filter: blur(18px);
+}
+
+.stat-label {
+  color: rgba(0, 0, 0, 0.42);
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 800;
+}
+
+.stat-value {
+  margin-top: 5px;
+  color: #111114;
+  font-size: 21px;
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.game-stage-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.game-stage {
+  position: relative;
+  width: min(100%, 960px, 118svh);
+  aspect-ratio: 3 / 2;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 34px;
+  background: rgba(255, 255, 255, 0.55);
+  box-shadow: 0 30px 90px rgba(15, 23, 42, 0.16);
+  backdrop-filter: blur(24px);
+}
+
+.game-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: none;
+  border: 0;
+  background: #f5f5f7;
+}
+
+.game-help {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  color: rgba(0, 0, 0, 0.56);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.help-item {
+  border: 1px solid rgba(255, 255, 255, 0.70);
+  border-radius: 18px;
+  padding: 9px 11px;
+  background: rgba(255, 255, 255, 0.56);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+  backdrop-filter: blur(16px);
+}
+
+.help-title {
+  color: rgba(0, 0, 0, 0.82);
+  font-weight: 800;
+}
+
+.game-over-backdrop {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(255, 255, 255, 0.40);
+  backdrop-filter: blur(7px);
+}
+
+.game-over-panel {
+  width: min(92%, 420px);
+  border: 1px solid rgba(255, 255, 255, 0.90);
+  border-radius: 30px;
+  padding: 24px;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: 0 28px 80px rgba(15, 23, 42, 0.18);
+  backdrop-filter: blur(28px);
+}
+
+.game-over-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 12px;
+  border-radius: 18px;
+  background: rgba(255, 69, 58, 0.10);
+  font-size: 30px;
+}
+
+.game-over-title {
+  margin: 0;
+  font-size: 25px;
+  font-weight: 850;
+  letter-spacing: -0.04em;
+}
+
+.game-over-text {
+  margin: 9px 0 0;
+  color: rgba(0, 0, 0, 0.58);
+  font-size: 14px;
+  line-height: 1.5;
+  font-weight: 500;
+}
+
+@media (max-width: 768px) {
+  .game-shell {
+    height: 100svh;
+    padding: 8px;
+    gap: 6px;
+  }
+
+  .game-header {
+    padding: 9px 10px;
+    border-radius: 22px;
+    gap: 8px;
+  }
+
+  .game-kicker {
+    display: none;
+  }
+
+  .game-title {
+    font-size: 22px;
+    line-height: 1.06;
+    letter-spacing: -0.045em;
+  }
+
+  .game-subtitle {
+    margin-top: 3px;
+    font-size: 12px;
+    line-height: 1.2;
+  }
+
+  .subtitle-full {
+    display: none;
+  }
+
+  .subtitle-short {
+    display: inline;
+  }
+
+  .restart-button {
+    border-radius: 14px;
+    padding: 8px 10px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .game-stats {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .mobile-hide {
+    display: none;
+  }
+
+  .stat-card {
+    border-radius: 14px;
+    padding: 7px 8px;
+  }
+
+  .stat-label {
+    font-size: 10px;
+  }
+
+  .stat-value {
+    margin-top: 4px;
+    font-size: 15px;
+    line-height: 1;
+  }
+
+  .game-stage {
+    width: min(100%, 102svh);
+    border-radius: 24px;
+  }
+
+  .game-help {
+    grid-template-columns: 1fr;
+    gap: 0;
+    font-size: 11px;
+    line-height: 1.25;
+  }
+
+  .help-item {
+    padding: 7px 9px;
+    border-radius: 14px;
+  }
+
+  .desktop-help {
+    display: none;
+  }
+
+  .game-over-panel {
+    border-radius: 24px;
+    padding: 18px;
+  }
+
+  .game-over-title {
+    font-size: 22px;
+  }
+}
+`;
 
 export default function AppleCrocArenaGame() {
   const canvasRef = useRef(null);
@@ -667,8 +1087,6 @@ export default function AppleCrocArenaGame() {
       const dpr = window.devicePixelRatio || 1;
       canvas.width = Math.floor(WIDTH * dpr);
       canvas.height = Math.floor(HEIGHT * dpr);
-      canvas.style.width = "100%";
-      canvas.style.height = "auto";
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     };
 
@@ -728,119 +1146,174 @@ export default function AppleCrocArenaGame() {
     };
   };
 
-  const onPointerMove = (event) => {
-    const p = getPointerWorld(event);
-    const g = gameRef.current;
-    g.pointer.x = p.x;
-    g.pointer.y = p.y;
-    g.pointer.active = true;
-  };
+  const isTouch = (event) => event.pointerType === "touch";
 
-  const onPointerDown = (event) => {
-    event.currentTarget.setPointerCapture?.(event.pointerId);
+  const handlePointerDown = (event) => {
+    const canvas = event.currentTarget;
+    canvas.setPointerCapture?.(event.pointerId);
+
     const p = getPointerWorld(event);
     const g = gameRef.current;
+
+    if (isTouch(event)) {
+      event.preventDefault();
+      const t = g.touch;
+      t.activePointers.set(event.pointerId, p);
+
+      if (t.movePointerId === null) {
+        t.movePointerId = event.pointerId;
+        t.startX = p.x;
+        t.startY = p.y;
+        t.currentX = p.x;
+        t.currentY = p.y;
+        t.moveX = 0;
+        t.moveY = 0;
+        return;
+      }
+
+      if (t.firePointerId === null && event.pointerId !== t.movePointerId) {
+        t.firePointerId = event.pointerId;
+        t.autoFire = true;
+        fireArrow(g);
+      }
+      return;
+    }
+
     g.pointer.x = p.x;
     g.pointer.y = p.y;
     g.pointer.active = true;
-    g.pointer.down = true;
     fireArrow(g);
   };
 
-  const onPointerUp = (event) => {
-    event.currentTarget.releasePointerCapture?.(event.pointerId);
-    gameRef.current.pointer.down = false;
+  const handlePointerMove = (event) => {
+    const p = getPointerWorld(event);
+    const g = gameRef.current;
+
+    if (isTouch(event)) {
+      event.preventDefault();
+      const t = g.touch;
+      t.activePointers.set(event.pointerId, p);
+
+      if (event.pointerId === t.movePointerId) {
+        t.currentX = p.x;
+        t.currentY = p.y;
+        updateTouchMove(g);
+      }
+      return;
+    }
+
+    g.pointer.x = p.x;
+    g.pointer.y = p.y;
+    g.pointer.active = true;
+  };
+
+  const handlePointerUp = (event) => {
+    const g = gameRef.current;
+
+    if (isTouch(event)) {
+      event.preventDefault();
+      const t = g.touch;
+      t.activePointers.delete(event.pointerId);
+
+      if (event.pointerId === t.movePointerId) {
+        clearTouchMove(g);
+      }
+
+      if (event.pointerId === t.firePointerId) {
+        t.firePointerId = null;
+        t.autoFire = false;
+      }
+      return;
+    }
+
+    g.pointer.active = false;
   };
 
   const accuracy = ui.shots ? Math.round((ui.hits / ui.shots) * 100) : 0;
 
   return (
-    <div className="min-h-screen w-full bg-[#f5f5f7] p-4 text-[#1d1d1f] sm:p-8">
-      <div className="mx-auto flex max-w-6xl flex-col gap-5">
-        <div className="flex flex-col justify-between gap-4 rounded-[2rem] border border-white/70 bg-white/70 p-5 shadow-[0_22px_70px_rgba(15,23,42,0.10)] backdrop-blur-2xl sm:flex-row sm:items-center">
+    <div className="game-page">
+      <style>{styles}</style>
+      <div className="game-shell">
+        <header className="game-header">
           <div>
-            <div className="mb-2 inline-flex rounded-full bg-black/5 px-3 py-1 text-xs font-semibold text-black/50">
-              Apple-style mini game
-            </div>
-            <h1 className="text-2xl font-semibold tracking-tight sm:text-4xl">鳄影斗兽场</h1>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-black/55 sm:text-base">
-              你被困在圆形斗兽场中。鳄鱼会越来越多，并沿着头鳄的尾迹组成追击链。射中同一只鳄鱼 5 次即可击杀。
+            <div className="game-kicker">Apple-style mini game</div>
+            <h1 className="game-title">鳄影斗兽场</h1>
+            <p className="game-subtitle">
+              <span className="subtitle-full">
+                你被困在圆形斗兽场中。鳄鱼会越来越多，并沿着头鳄的尾迹组成追击链。射中同一只鳄鱼 5 次即可击杀。
+              </span>
+              <span className="subtitle-short">逃离鳄鱼，5箭击杀一只。</span>
             </p>
           </div>
-          <button
-            onClick={reset}
-            className="rounded-2xl bg-[#007aff] px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-500/25 transition hover:scale-[1.02] active:scale-[0.98]"
-          >
+          <button className="restart-button" onClick={reset} type="button">
             重新开始
           </button>
-        </div>
+        </header>
 
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
+        <section className="game-stats" aria-label="游戏状态">
           <Stat label="分数" value={ui.score} />
-          <Stat label="存活时间" value={`${ui.time.toFixed(1)}s`} />
+          <Stat label="时间" value={`${ui.time.toFixed(1)}s`} />
           <Stat label="鳄鱼" value={ui.crocs} />
           <Stat label="击杀" value={ui.kills} />
-          <Stat label="命中率" value={`${accuracy}%`} />
-          <Stat label="箭矢" value={ui.shots} />
-        </div>
+          <Stat label="命中" value={`${accuracy}%`} className="mobile-hide" />
+          <Stat label="箭矢" value={ui.shots} className="mobile-hide" />
+        </section>
 
-        <div className="relative overflow-hidden rounded-[2.4rem] border border-white/80 bg-white/55 p-3 shadow-[0_30px_90px_rgba(15,23,42,0.16)] backdrop-blur-2xl">
-          <canvas
-            ref={canvasRef}
-            width={WIDTH}
-            height={HEIGHT}
-            onPointerMove={onPointerMove}
-            onPointerDown={onPointerDown}
-            onPointerUp={onPointerUp}
-            onPointerCancel={onPointerUp}
-            className="block aspect-[3/2] w-full touch-none rounded-[2rem] bg-white"
-          />
+        <main className="game-stage-wrap">
+          <div className="game-stage">
+            <canvas
+              ref={canvasRef}
+              className="game-canvas"
+              width={WIDTH}
+              height={HEIGHT}
+              tabIndex={-1}
+              onContextMenu={(event) => event.preventDefault()}
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerUp}
+            />
 
-          {ui.over && (
-            <div className="absolute inset-3 flex items-center justify-center rounded-[2rem] bg-white/45 backdrop-blur-sm">
-              <div className="w-[min(92%,420px)] rounded-[2rem] border border-white/90 bg-white/82 p-6 text-center shadow-2xl shadow-black/10 backdrop-blur-2xl">
-                <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-red-500/10 text-3xl">
-                  🐊
+            {ui.over && (
+              <div className="game-over-backdrop">
+                <div className="game-over-panel">
+                  <div className="game-over-icon">🐊</div>
+                  <h2 className="game-over-title">你被鳄鱼吃掉了</h2>
+                  <p className="game-over-text">
+                    本局得分 {ui.score}，击杀 {ui.kills} 只鳄鱼，坚持 {ui.time.toFixed(1)} 秒。
+                  </p>
+                  <button className="restart-button" onClick={reset} type="button">
+                    再来一局
+                  </button>
                 </div>
-                <h2 className="text-2xl font-semibold tracking-tight">你被鳄鱼吃掉了</h2>
-                <p className="mt-2 text-sm leading-6 text-black/55">
-                  本局得分 {ui.score}，击杀 {ui.kills} 只鳄鱼，坚持 {ui.time.toFixed(1)} 秒。
-                </p>
-                <button
-                  onClick={reset}
-                  className="mt-5 rounded-2xl bg-black px-5 py-3 text-sm font-semibold text-white transition hover:scale-[1.02] active:scale-[0.98]"
-                >
-                  再来一局
-                </button>
               </div>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        </main>
 
-        <div className="grid gap-3 text-sm text-black/56 sm:grid-cols-3">
-          <Hint title="移动" text="WASD 或方向键控制人物逃跑。按住鼠标/触屏也可朝目标方向移动。" />
-          <Hint title="射击" text="鼠标移动瞄准，点击或按空格射箭。每只鳄鱼需要命中 5 次。" />
-          <Hint title="规则" text="斗兽场边界不会致命，但碰到鳄鱼头部、身体或尾巴都会立刻失败。" />
-        </div>
+        <footer className="game-help">
+          <div className="help-item">
+            <span className="help-title">手机：</span>单指拖动移动，第二根手指点击或按住射箭。
+          </div>
+          <div className="help-item desktop-help">
+            <span className="help-title">电脑：</span>WASD / 方向键移动，鼠标瞄准，点击或空格射箭。
+          </div>
+          <div className="help-item desktop-help">
+            <span className="help-title">规则：</span>碰到鳄鱼头部、身体或尾巴都会失败。
+          </div>
+        </footer>
       </div>
     </div>
   );
 }
 
-function Stat({ label, value }) {
+function Stat({ label, value, className = "" }) {
   return (
-    <div className="rounded-3xl border border-white/70 bg-white/70 p-4 shadow-[0_12px_40px_rgba(15,23,42,0.07)] backdrop-blur-xl">
-      <div className="text-xs font-semibold text-black/42">{label}</div>
-      <div className="mt-1 text-2xl font-semibold tracking-tight">{value}</div>
+    <div className={`stat-card ${className}`}>
+      <div className="stat-label">{label}</div>
+      <div className="stat-value">{value}</div>
     </div>
   );
 }
 
-function Hint({ title, text }) {
-  return (
-    <div className="rounded-3xl border border-white/70 bg-white/60 p-4 shadow-[0_12px_40px_rgba(15,23,42,0.06)] backdrop-blur-xl">
-      <div className="font-semibold text-black/80">{title}</div>
-      <p className="mt-1 leading-6">{text}</p>
-    </div>
-  );
-}
