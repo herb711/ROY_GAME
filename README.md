@@ -1,15 +1,16 @@
-# 腾讯云服务器
+# Croc Arena
 
-## 连接信息
+A React mini game built with Vite.
 
-- IP: 118.25.230.236
-- 端口: 8956
-- 用户: ubuntu
-- 命令:
-  ```bash
-  ssh -p 8956 ubuntu@118.25.230.236
-  ```
+## Development
 
-## 测试状态
+```bash
+npm install
+npm run dev
+```
 
-待手动测试连接
+## Build
+
+```bash
+npm run build
+```
